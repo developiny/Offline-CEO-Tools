@@ -103,6 +103,40 @@ function dataUrlToBlob(dataUrl) {
   return new Blob([bytes], { type: mime })
 }
 
+function looksLikeHttpUrl(text) {
+  try {
+    const u = new URL(String(text || '').trim())
+    return u.protocol === 'http:' || u.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+function decodeQrFromCanvas(jsQR, canvas) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return ''
+  const w = canvas.width
+  const h = canvas.height
+  if (!w || !h) return ''
+  const img = ctx.getImageData(0, 0, w, h)
+
+  // Try normal + inverted decoding first.
+  let res = jsQR(img.data, w, h, { inversionAttempts: 'attemptBoth' })
+  if (res?.data) return res.data
+
+  // Then try a simple high-contrast pass for noisy screenshots.
+  const boosted = new Uint8ClampedArray(img.data)
+  for (let i = 0; i < boosted.length; i += 4) {
+    const lum = 0.2126 * boosted[i] + 0.7152 * boosted[i + 1] + 0.0722 * boosted[i + 2]
+    const v = lum > 145 ? 255 : 0
+    boosted[i] = v
+    boosted[i + 1] = v
+    boosted[i + 2] = v
+  }
+  res = jsQR(boosted, w, h, { inversionAttempts: 'attemptBoth' })
+  return res?.data || ''
+}
+
 function applyRename(name, opts) {
   const base = safeName(name).replace(/\.[^.]+$/, '')
   const ext = (safeName(name).match(/\.([^.]+)$/) || [])[1] || ''
@@ -421,7 +455,11 @@ export default function ProductivityTools() {
   const canvasRef = useRef(null)
   const [camOn, setCamOn] = useState(false)
   const [qrFound, setQrFound] = useState('')
+  const [qrReading, setQrReading] = useState(false)
+  const [qrImagePreview, setQrImagePreview] = useState('')
+  const [qrImageName, setQrImageName] = useState('')
   const streamRef = useRef(null)
+  const qrPreviewRef = useRef('')
 
   async function startCamera() {
     setErr('')
@@ -481,20 +519,56 @@ export default function ProductivityTools() {
   async function readQrFromImageFile(file) {
     setErr('')
     setQrFound('')
+    setQrReading(true)
     try {
-      const bmp = await createImageBitmap(file)
-      const c = document.createElement('canvas')
-      c.width = bmp.width
-      c.height = bmp.height
-      const ctx = c.getContext('2d', { willReadFrequently: true })
-      ctx.drawImage(bmp, 0, 0)
-      const img = ctx.getImageData(0, 0, c.width, c.height)
+      if (qrPreviewRef.current) URL.revokeObjectURL(qrPreviewRef.current)
+      const previewUrl = URL.createObjectURL(file)
+      qrPreviewRef.current = previewUrl
+      setQrImagePreview(previewUrl)
+      setQrImageName(file.name || 'image')
+
       const jsQR = await getJsQrLib()
-      const res = jsQR(img.data, c.width, c.height)
-      if (res?.data) setQrFound(res.data)
+      const bmp = await createImageBitmap(file)
+      const maxSide = Math.max(1, bmp.width, bmp.height)
+      const baseScale = Math.min(1, 1800 / maxSide)
+      const variants = [
+        { scale: 1.0, rotate: 0 },
+        { scale: 1.0, rotate: 90 },
+        { scale: 1.0, rotate: 180 },
+        { scale: 1.0, rotate: 270 },
+        { scale: 0.75, rotate: 0 },
+        { scale: 1.35, rotate: 0 },
+        { scale: 0.5, rotate: 0 },
+      ]
+      let found = ''
+      for (const step of variants) {
+        if (found) break
+        const s = Math.max(0.2, step.scale * baseScale)
+        const rw = Math.max(1, Math.round(bmp.width * s))
+        const rh = Math.max(1, Math.round(bmp.height * s))
+        const rot = ((step.rotate % 360) + 360) % 360
+        const swap = rot === 90 || rot === 270
+        const outW = swap ? rh : rw
+        const outH = swap ? rw : rh
+
+        const c = document.createElement('canvas')
+        c.width = outW
+        c.height = outH
+        const ctx = c.getContext('2d', { willReadFrequently: true })
+        if (!ctx) continue
+        ctx.translate(outW / 2, outH / 2)
+        ctx.rotate((rot * Math.PI) / 180)
+        ctx.drawImage(bmp, -rw / 2, -rh / 2, rw, rh)
+        found = decodeQrFromCanvas(jsQR, c)
+      }
+      if (typeof bmp.close === 'function') bmp.close()
+
+      if (found) setQrFound(found)
       else setErr('No QR code detected in this image.')
     } catch (e) {
       setErr(e?.message || String(e))
+    } finally {
+      setQrReading(false)
     }
   }
 
@@ -654,6 +728,11 @@ export default function ProductivityTools() {
 
   useEffect(() => () => stopCamera(), [])
   useEffect(() => {
+    return () => {
+      if (qrPreviewRef.current) URL.revokeObjectURL(qrPreviewRef.current)
+    }
+  }, [])
+  useEffect(() => {
     if (tool !== 'qr') stopCamera()
   }, [tool])
 
@@ -715,8 +794,43 @@ export default function ProductivityTools() {
               ) : (
                 <button className="button button--ghost" type="button" onClick={stopCamera}>Stop camera</button>
               )}
-              <div className="muted">Or decode from an image:</div>
-              <input className="input" type="file" accept="image/*" onChange={(e) => (e.target.files?.[0] ? readQrFromImageFile(e.target.files[0]) : null)} />
+              <button
+                className="button button--ghost"
+                type="button"
+                onClick={async () => {
+                  try {
+                    if (!qrFound) return
+                    await navigator.clipboard.writeText(qrFound)
+                  } catch {
+                    setErr('Clipboard blocked by browser permissions.')
+                  }
+                }}
+                disabled={!qrFound}
+              >
+                Copy result
+              </button>
+              <button
+                className="button button--ghost"
+                type="button"
+                onClick={() => {
+                  if (!looksLikeHttpUrl(qrFound)) return
+                  window.open(qrFound, '_blank', 'noopener,noreferrer')
+                }}
+                disabled={!looksLikeHttpUrl(qrFound)}
+              >
+                Open URL
+              </button>
+            </div>
+            <div style={{ marginTop: 10 }}>
+              <FileDrop
+                label="Drop QR image"
+                hint="Or click to choose a local image"
+                accept={['image/*']}
+                multiple={false}
+                onFiles={(files) => {
+                  if (files?.[0]) readQrFromImageFile(files[0])
+                }}
+              />
             </div>
 
             {camOn ? (
@@ -725,10 +839,22 @@ export default function ProductivityTools() {
                 <canvas ref={canvasRef} style={{ width: '100%', borderRadius: 12, opacity: 0.25 }} />
               </div>
             ) : null}
+            {qrImagePreview ? (
+              <div className="panel" style={{ padding: 10, marginTop: 10 }}>
+                <div className="mono muted" style={{ marginBottom: 8 }}>
+                  Uploaded image: {qrImageName || 'image'}
+                </div>
+                <img
+                  src={qrImagePreview}
+                  alt="QR upload preview"
+                  style={{ maxWidth: '100%', borderRadius: 12, display: 'block' }}
+                />
+              </div>
+            ) : null}
 
             <div className="field" style={{ marginTop: 10 }}>
-              <label>Detected</label>
-              <input className="input mono" value={qrFound} readOnly placeholder="No QR detected yet" />
+              <label>Detected {qrReading ? '(scanning image...)' : ''}</label>
+              <textarea className="textarea mono" value={qrFound} readOnly placeholder="No QR detected yet" />
             </div>
           </div>
         </section>
