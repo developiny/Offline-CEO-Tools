@@ -189,8 +189,8 @@ export default function ImageTools() {
   const [svgScale, setSvgScale] = useState(1024)
   const [svgImgFile, setSvgImgFile] = useState(null)
   const [svgImgWidth, setSvgImgWidth] = useState(640)
-  const [svgImgBlock, setSvgImgBlock] = useState(8)
-  const [svgImgLevels, setSvgImgLevels] = useState(16)
+  const [svgImgBlock, setSvgImgBlock] = useState(1)
+  const [svgImgLevels, setSvgImgLevels] = useState(64)
 
   // Favicon validator
   const [favFiles, setFavFiles] = useState([])
@@ -1278,7 +1278,7 @@ export default function ImageTools() {
 
       const cellsX = Math.ceil(targetW / block)
       const cellsY = Math.ceil(targetH / block)
-      const maxCells = 28000
+      const maxCells = block === 1 ? 420000 : 28000
       if (cellsX * cellsY > maxCells) throw new Error('Output too large. Increase block size or reduce width.')
 
       const qChan = (v) => {
@@ -1289,42 +1289,91 @@ export default function ImageTools() {
         `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`
 
       const rects = []
-      for (let by = 0; by < targetH; by += block) {
-        for (let bx = 0; bx < targetW; bx += block) {
-          const bw = Math.min(block, targetW - bx)
-          const bh = Math.min(block, targetH - by)
-          let sr = 0
-          let sg = 0
-          let sb = 0
-          let sa = 0
-          let c = 0
-          for (let y = 0; y < bh; y++) {
-            for (let x = 0; x < bw; x++) {
-              const i = ((by + y) * targetW + (bx + x)) * 4
-              sr += data[i]
-              sg += data[i + 1]
-              sb += data[i + 2]
-              sa += data[i + 3]
-              c++
+      if (block === 1) {
+        // High-fidelity path: one-pixel sampling with run merging per row to reduce SVG size.
+        for (let y = 0; y < targetH; y++) {
+          let runX = 0
+          let runFill = ''
+          let runAlpha = 1
+          let hasRun = false
+          const flushRun = (xEnd) => {
+            if (!hasRun) return
+            const runW = xEnd - runX
+            if (runW <= 0) return
+            rects.push(
+              runAlpha >= 0.995
+                ? `<rect x="${runX}" y="${y}" width="${runW}" height="1" fill="${runFill}"/>`
+                : `<rect x="${runX}" y="${y}" width="${runW}" height="1" fill="${runFill}" fill-opacity="${runAlpha}"/>`,
+            )
+            hasRun = false
+          }
+
+          for (let x = 0; x < targetW; x++) {
+            const i = (y * targetW + x) * 4
+            const a = data[i + 3] / 255
+            if (a < 0.02) {
+              flushRun(x)
+              continue
+            }
+            const fill = hex(qChan(data[i]), qChan(data[i + 1]), qChan(data[i + 2]))
+            const alpha = Math.round(a * 1000) / 1000
+            if (!hasRun) {
+              runX = x
+              runFill = fill
+              runAlpha = alpha
+              hasRun = true
+              continue
+            }
+            if (fill !== runFill || Math.abs(alpha - runAlpha) > 0.0001) {
+              flushRun(x)
+              runX = x
+              runFill = fill
+              runAlpha = alpha
+              hasRun = true
             }
           }
-          if (!c) continue
-          const a = sa / (255 * c)
-          if (a < 0.02) continue
-          const r = qChan(Math.round(sr / c))
-          const g = qChan(Math.round(sg / c))
-          const b = qChan(Math.round(sb / c))
-          const alpha = Math.round(a * 1000) / 1000
-          rects.push(
-            alpha >= 0.995
-              ? `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" fill="${hex(r, g, b)}"/>`
-              : `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" fill="${hex(r, g, b)}" fill-opacity="${alpha}"/>`,
-          )
+          flushRun(targetW)
+          setProgress((y + 1) / Math.max(1, targetH))
         }
-        setProgress((by + block) / Math.max(1, targetH))
+      } else {
+        for (let by = 0; by < targetH; by += block) {
+          for (let bx = 0; bx < targetW; bx += block) {
+            const bw = Math.min(block, targetW - bx)
+            const bh = Math.min(block, targetH - by)
+            let sr = 0
+            let sg = 0
+            let sb = 0
+            let sa = 0
+            let c = 0
+            for (let y = 0; y < bh; y++) {
+              for (let x = 0; x < bw; x++) {
+                const i = ((by + y) * targetW + (bx + x)) * 4
+                sr += data[i]
+                sg += data[i + 1]
+                sb += data[i + 2]
+                sa += data[i + 3]
+                c++
+              }
+            }
+            if (!c) continue
+            const a = sa / (255 * c)
+            if (a < 0.02) continue
+            const r = qChan(Math.round(sr / c))
+            const g = qChan(Math.round(sg / c))
+            const b = qChan(Math.round(sb / c))
+            const alpha = Math.round(a * 1000) / 1000
+            rects.push(
+              alpha >= 0.995
+                ? `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" fill="${hex(r, g, b)}"/>`
+                : `<rect x="${bx}" y="${by}" width="${bw}" height="${bh}" fill="${hex(r, g, b)}" fill-opacity="${alpha}"/>`,
+            )
+          }
+          setProgress((by + block) / Math.max(1, targetH))
+        }
       }
 
-      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${targetW}" height="${targetH}" viewBox="0 0 ${targetW} ${targetH}" shape-rendering="crispEdges">\n${rects.join('\n')}\n</svg>\n`
+      const shapeRendering = block > 1 ? 'crispEdges' : 'geometricPrecision'
+      const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${targetW}" height="${targetH}" viewBox="0 0 ${targetW} ${targetH}" shape-rendering="${shapeRendering}">\n${rects.join('\n')}\n</svg>\n`
       setSvgCode(svg)
       setProgress(1)
     } catch (e) {
@@ -2315,17 +2364,20 @@ export default function ImageTools() {
                   <div className="row">
                     <div className="field" style={{ width: 220 }}>
                       <label>Output width (px)</label>
-                      <input className="input" type="number" value={svgImgWidth} onChange={(e) => setSvgImgWidth(e.target.value)} />
+                      <input className="input" type="number" min="64" max="2048" step="1" value={svgImgWidth} onChange={(e) => setSvgImgWidth(e.target.value)} />
                     </div>
                     <div className="field" style={{ width: 220 }}>
                       <label>Block size (px)</label>
-                      <input className="input" type="number" value={svgImgBlock} onChange={(e) => setSvgImgBlock(e.target.value)} />
+                      <input className="input" type="number" min="1" max="64" step="1" value={svgImgBlock} onChange={(e) => setSvgImgBlock(e.target.value)} />
                     </div>
                     <div className="field" style={{ width: 220 }}>
                       <label>Color levels</label>
-                      <input className="input" type="number" value={svgImgLevels} onChange={(e) => setSvgImgLevels(e.target.value)} />
+                      <input className="input" type="number" min="2" max="64" step="1" value={svgImgLevels} onChange={(e) => setSvgImgLevels(e.target.value)} />
                     </div>
                   </div>
+                  <p className="muted">
+                    Set block size to <strong>1</strong> for closest visual match. This creates larger SVG files.
+                  </p>
                   <div className="row">
                     <button className="button" type="button" onClick={convertImageToSvg} disabled={!svgImgFile || busy}>
                       Convert to SVG
