@@ -1,7 +1,7 @@
 {
-  "repo": "https://github.com/your-user/your-repo",
-  "releases": "https://github.com/your-user/your-repo/releases",
-  "macos": "",
+  "repo": "https://github.com/developiny/Offline-CEO-Tools",
+  "releases": "https://github.com/developiny/Offline-CEO-Tools/releases",
+  "macos": "https://github.com/developiny/Offline-CEO-Tools/releases/download/macos/Offline.CEO.Tools_0.1.0_aarch64.dmg",
   "windows": "",
   "linux": ""
 }

@@ -399,7 +399,7 @@ export default function Layout() {
       <footer className="app__footer">
         <div className="container footer__row">
           <div className="muted">
-            Built with React + Vite. Works offline once loaded.
+            Built with React + Vite. Works offline once loaded BY DEVELOPINY.
           </div>
           <div className="muted">© {new Date().getFullYear()}</div>
         </div>
